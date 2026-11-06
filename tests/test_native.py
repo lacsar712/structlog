@@ -372,11 +372,16 @@ class TestNativeFilteringLogger:
 
         assert [("info", (), {"event": "hey %! %%!"})] == cl.calls
 
-    def test_log_level_str(self):
+    def test_log_level_str(self, cl):
         """
         *min_level* can be a string and the case doesn't matter.
         """
-        bl = make_filtering_bound_logger("wArNiNg")
+        bl = make_filtering_bound_logger("wArNiNg")(cl, [], {})
 
         assert bl.warning is not _nop
-        assert bl.info is _nop
+
+        bl.info("nope")
+        assert [] == cl.calls
+
+        bl.warning("yep")
+        assert 1 == len(cl.calls)

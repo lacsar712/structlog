@@ -14,6 +14,7 @@ __lazy_modules__ = [
     "structlog._generic",
     "structlog._native",
     "structlog._output",
+    "structlog.emission",
     "structlog.exceptions",
     "structlog.testing",
 ]
@@ -21,6 +22,7 @@ __lazy_modules__ = [
 from structlog import (
     contextvars,
     dev,
+    emission,
     processors,
     stdlib,
     testing,
@@ -50,6 +52,24 @@ from structlog._output import (
     WriteLogger,
     WriteLoggerFactory,
 )
+from structlog.emission import (
+    DENY_NEW,
+    FORCE_EMIT,
+    FREEZE_EVENT,
+    HONOR_CFG,
+    ONE_MORE,
+    SKIP_CHAIN,
+    EffectiveEmissionPolicy,
+    EmissionPolicyToken,
+    EventFrozenError,
+    LogEmissionDenied,
+    MuteBelow,
+    emission_scope,
+    get_effective_policy,
+    mute_below,
+    pop_emission_policy,
+    push_emission_policy,
+)
 from structlog.exceptions import DropEvent
 from structlog.testing import ReturnLogger, ReturnLoggerFactory
 
@@ -69,11 +89,22 @@ __copyright__ = "Copyright (c) 2013 " + __author__
 
 
 __all__ = [
+    "DENY_NEW",
+    "FORCE_EMIT",
+    "FREEZE_EVENT",
+    "HONOR_CFG",
+    "ONE_MORE",
+    "SKIP_CHAIN",
     "BoundLogger",
     "BoundLoggerBase",
     "BytesLogger",
     "BytesLoggerFactory",
     "DropEvent",
+    "EffectiveEmissionPolicy",
+    "EmissionPolicyToken",
+    "EventFrozenError",
+    "LogEmissionDenied",
+    "MuteBelow",
     "PrintLogger",
     "PrintLoggerFactory",
     "ReturnLogger",
@@ -84,13 +115,19 @@ __all__ = [
     "configure_once",
     "contextvars",
     "dev",
+    "emission",
+    "emission_scope",
     "getLogger",
     "get_config",
     "get_context",
+    "get_effective_policy",
     "get_logger",
     "is_configured",
     "make_filtering_bound_logger",
+    "mute_below",
+    "pop_emission_policy",
     "processors",
+    "push_emission_policy",
     "reset_defaults",
     "stdlib",
     "testing",

@@ -21,6 +21,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from . import emission
 from ._base import BoundLoggerBase
 from ._log_levels import (
     CRITICAL,
@@ -166,12 +167,13 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
     def make_method(
         level: int,
     ) -> tuple[Callable[..., Any], Callable[..., Any]]:
-        if level < min_level:
-            return _nop, _anop
-
         name = LEVEL_TO_NAME[level]
 
         def meth(self: Any, event: str, *args: Any, **kw: Any) -> Any:
+            # Merged view of the static min level and the active level gate.
+            if not emission.native_level_allowed(level, min_level):
+                return None
+
             return self._proxy_to_logger(
                 name, _maybe_interpolate(event, args), **kw
             )
@@ -181,6 +183,11 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
             .. versionchanged:: 23.3.0
                Callsite parameters are now also collected under asyncio.
             """
+            # Keep the static fast-path: with no frame active a filtered
+            # method must not touch the event loop at all.
+            if level < min_level and not _active_level_gate():
+                return None
+
             event = _maybe_interpolate(event, args)
 
             # Capture thread-specific info before handing off to the executor.
@@ -191,11 +198,11 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
             ctx = contextvars.copy_context()
 
             try:
+                # The authoritative gate evaluation happens in the copied
+                # context, i.e. against the stack as it is at call time.
                 await asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda: ctx.run(
-                        lambda: self._proxy_to_logger(name, event, **kw)
-                    ),
+                    lambda: ctx.run(lambda: meth(self, event, **kw)),
                 )
             finally:
                 _ASYNC_CALLING_STACK.reset(scs_token)
@@ -206,8 +213,11 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
 
         return meth, ameth
 
+    def _active_level_gate() -> bool:
+        return emission.frame_level_gate() is not emission.HONOR_CFG
+
     def log(self: Any, level: int, event: str, *args: Any, **kw: Any) -> Any:
-        if level < min_level:
+        if not emission.native_level_allowed(level, min_level):
             return None
         name = LEVEL_TO_NAME[level]
 
@@ -222,9 +232,8 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
         .. versionchanged:: 23.3.0
            Callsite parameters are now also collected under asyncio.
         """
-        if level < min_level:
+        if level < min_level and not _active_level_gate():
             return None
-        name = LEVEL_TO_NAME[level]
         event = _maybe_interpolate(event, args)
 
         # Capture thread-specific info before handing off to the executor.
@@ -237,9 +246,7 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
         try:
             runner = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: ctx.run(
-                    lambda: self._proxy_to_logger(name, event, **kw)
-                ),
+                lambda: ctx.run(lambda: log(self, level, event, **kw)),
             )
         finally:
             _ASYNC_CALLING_STACK.reset(scs_token)
@@ -260,9 +267,13 @@ def _make_filtering_bound_logger(min_level: int) -> type[FilteringBoundLogger]:
     meths["msg"] = meths["info"]
     meths["amsg"] = meths["ainfo"]
 
-    # Introspection
-    meths["is_enabled_for"] = lambda self, level: level >= min_level
-    meths["get_effective_level"] = lambda self: min_level
+    # Introspection -- merged with the active level gate, if any.
+    meths["is_enabled_for"] = lambda self, level: (
+        emission.native_level_allowed(level, min_level)
+    )
+    meths["get_effective_level"] = lambda self: emission.effective_level(
+        min_level
+    )
 
     return type(
         f"BoundLoggerFilteringAt{LEVEL_TO_NAME.get(min_level, 'Notset').capitalize()}",

@@ -16,6 +16,8 @@ from typing import Any
 
 from structlog.exceptions import DropEvent
 
+from . import emission
+from ._log_levels import NAME_TO_LEVEL, map_method_name
 from .typing import BindableLogger, Context, Processor, WrappedLogger
 
 
@@ -170,8 +172,10 @@ class BoundLoggerBase:
 
         if event is not None:
             event_dict["event"] = event
-        for proc in self._processors:
-            event_dict = proc(self._logger, method_name, event_dict)
+
+        event_dict = emission.run_gated_processors(
+            self._processors, self._logger, method_name, event_dict
+        )
 
         if isinstance(event_dict, (str, bytes, bytearray)):
             return (event_dict,), {}
@@ -220,8 +224,28 @@ class BoundLoggerBase:
             See also `custom-wrappers`.
         """
         try:
+            level = NAME_TO_LEVEL.get(map_method_name(method_name))
+            level_gate = emission.frame_level_gate()
+            if (
+                level is not None
+                and isinstance(level_gate, emission.MuteBelow)
+                and level
+                < max(
+                    level_gate.level,
+                    emission.wrapper_configured_floor(self._logger),
+                )
+            ):
+                # Swallowed by an active mute_below frame; never run the
+                # chain or the final write.
+                return None
+
+            emission.admit_emission(method_name)
+
             args, kw = self._process_event(method_name, event, event_kw)
-            return getattr(self._logger, method_name)(*args, **kw)
+            with emission.writing():
+                return emission.dispatch_wrapped(
+                    self._logger, method_name, args, kw
+                )
         except DropEvent:
             return None
 

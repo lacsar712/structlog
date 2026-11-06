@@ -33,7 +33,7 @@ else:
     from typing_extensions import Self
 
 
-from . import _config
+from . import _config, emission
 from ._base import BoundLoggerBase
 from ._frames import _find_first_app_frame_and_name, _format_stack
 from ._log_levels import LEVEL_TO_NAME, NAME_TO_LEVEL, add_log_level
@@ -429,7 +429,15 @@ class BoundLogger(BoundLoggerBase):
 
         .. versionadded:: 26.1.0
         """
-        return self._logger.isEnabledFor(level)
+        gate = emission.frame_level_gate()
+        if gate is emission.HONOR_CFG:
+            return self._logger.isEnabledFor(level)
+        if gate is emission.FORCE_EMIT:
+            return not self._logger.disabled
+
+        return not self._logger.disabled and level >= max(
+            self._logger.getEffectiveLevel(), gate.level
+        )
 
     def get_effective_level(self) -> int:
         """
@@ -1159,6 +1167,7 @@ class ProcessorFormatter(logging.Formatter):
         logger = getattr(record, "_logger", _SENTINEL)
         meth_name = getattr(record, "_name", "__structlog_sentinel__")
 
+        gate = emission.current_processor_gate()
         ed: ProcessorReturnValue
         if logger is not _SENTINEL and meth_name != "__structlog_sentinel__":
             # Both attached by wrap_for_formatter
@@ -1169,12 +1178,20 @@ class ProcessorFormatter(logging.Formatter):
             # We need to copy because it's possible that the same record gets
             # processed by multiple logging formatters. LogRecord.getMessage
             # would transform our dict into a str.
-            ed = cast(dict[str, Any], record.msg).copy()
+            incoming = cast(dict[str, Any], record.msg)
+            # Keys that originated at the structlog log-method entry.
+            frozen_keys = set(incoming)
+            ed = incoming.copy()
             ed["_record"] = record
             ed["_from_structlog"] = True
         else:
             logger = self.logger
             meth_name = record.levelname.lower()
+
+            # A foreign record that reaches us has not passed any structlog
+            # boundary yet, so evaluate the admission/level gates here.
+            emission.admit_foreign_record(record.levelno, meth_name)
+
             ed = {
                 "event": (
                     record.getMessage()
@@ -1196,10 +1213,26 @@ class ProcessorFormatter(logging.Formatter):
             if record.stack_info:
                 ed["stack_info"] = record.stack_info
 
+            # Only the event content above is frozen; formatter metadata
+            # (_record/_from_structlog) and keys appended by chains stay
+            # mutable/removable.
+            frozen_keys = set(ed) - {"_record", "_from_structlog"}
+
             # Non-structlog allows to run through a chain to prepare it for the
-            # final processor (e.g. adding timestamps and log levels).
-            for proc in self.foreign_pre_chain or ():
-                ed = cast(EventDict, proc(logger, meth_name, ed))
+            # final processor (e.g. adding timestamps and log levels). Under
+            # skip_chain the whole foreign pre-chain is intermediate work and
+            # gets skipped.
+            if self.foreign_pre_chain and gate is not emission.SKIP_CHAIN:
+                ed = cast(
+                    EventDict,
+                    emission.run_gated_processors(
+                        self.foreign_pre_chain,
+                        logger,
+                        meth_name,
+                        ed,
+                        frozen_keys=frozen_keys,
+                    ),
+                )
 
         # If required, unset stack-related attributes on the record copy so
         # that the base implementation doesn't append stacktraces to the
@@ -1210,8 +1243,34 @@ class ProcessorFormatter(logging.Formatter):
         if not self.keep_stack_info:
             record.stack_info = None
 
-        for p in self.processors:
-            ed = p(logger, meth_name, ed)  # type: ignore[arg-type]
+        def _select_formatter_processors(
+            processors: Iterable[Processor], gate: str
+        ) -> tuple[Processor, ...]:
+            # Skipping the chain keeps the final renderer but retains the
+            # metadata remover, since both are formatter mechanics rather
+            # than intermediate user processors.
+            chain = tuple(processors)
+            if gate is not emission.SKIP_CHAIN or not chain:
+                return chain
+
+            retained: list[Processor] = [chain[-1]]
+            meta_remover = ProcessorFormatter.remove_processors_meta
+            if meta_remover in chain[:-1] and meta_remover not in retained:
+                retained.insert(0, meta_remover)
+
+            return tuple(retained)
+
+        ed = cast(
+            ProcessorReturnValue,
+            emission.run_gated_processors(
+                self.processors,
+                logger,
+                meth_name,
+                ed,
+                frozen_keys=frozen_keys,
+                chain_selector=_select_formatter_processors,
+            ),
+        )
 
         if not isinstance(ed, str):
             warnings.warn(

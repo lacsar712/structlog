@@ -21,10 +21,35 @@ from pickle import PicklingError
 from sys import stderr, stdout
 from typing import IO, Any, BinaryIO, TextIO
 
+from . import emission
+
 
 WRITE_LOCKS: weakref.WeakKeyDictionary[IO[Any], threading.Lock] = (
     weakref.WeakKeyDictionary()
 )
+
+
+def _make_native_write_method(level_name: str) -> Any:
+    """
+    Create a level-named write method that honors an active emission frame
+    for *direct* writes, while leaving the raw ``msg`` write untouched.
+    """
+
+    def write(self: Any, message: Any) -> Any:
+        return emission.guarded_native_write(self, level_name, message)
+
+    write.__name__ = level_name
+
+    return write
+
+
+_NATIVE_MSG = _make_native_write_method("msg")
+_NATIVE_DEBUG = _make_native_write_method("debug")
+_NATIVE_INFO = _make_native_write_method("info")
+_NATIVE_WARNING = _make_native_write_method("warning")
+_NATIVE_ERROR = _make_native_write_method("error")
+_NATIVE_CRITICAL = _make_native_write_method("critical")
+_NATIVE_LOG = _make_native_write_method("log")
 
 
 def _get_lock_for_file(file: IO[Any]) -> threading.Lock:
@@ -107,16 +132,21 @@ class PrintLogger:
     def __repr__(self) -> str:
         return f"<PrintLogger(file={self._file!r})>"
 
-    def msg(self, message: str) -> None:
+    def _structlog_raw_write(self, message: str) -> None:
         """
-        Print *message*.
+        Print *message* without evaluating any emission frame.
         """
         f = self._file if self._file is not stdout else None
         with self._lock:
             print(message, file=f, flush=True)
 
-    log = debug = info = warn = warning = msg
-    fatal = failure = err = error = critical = exception = msg
+    msg = _NATIVE_MSG
+    debug = _NATIVE_DEBUG
+    info = _NATIVE_INFO
+    warning = warn = _NATIVE_WARNING
+    error = err = exception = _NATIVE_ERROR
+    critical = fatal = failure = _NATIVE_CRITICAL
+    log = _NATIVE_LOG
 
 
 class PrintLoggerFactory:
@@ -217,16 +247,21 @@ class WriteLogger:
     def __repr__(self) -> str:
         return f"<WriteLogger(file={self._file!r})>"
 
-    def msg(self, message: str) -> None:
+    def _structlog_raw_write(self, message: str) -> None:
         """
-        Write and flush *message*.
+        Write and flush *message* without evaluating any emission frame.
         """
         with self._lock:
             self._write(message + "\n")
             self._flush()
 
-    log = debug = info = warn = warning = msg
-    fatal = failure = err = error = critical = exception = msg
+    msg = _NATIVE_MSG
+    debug = _NATIVE_DEBUG
+    info = _NATIVE_INFO
+    warning = warn = _NATIVE_WARNING
+    error = err = exception = _NATIVE_ERROR
+    critical = fatal = failure = _NATIVE_CRITICAL
+    log = _NATIVE_LOG
 
 
 class WriteLoggerFactory:
@@ -344,16 +379,21 @@ class BytesLogger:
 
         return f"<BytesLogger(name={self.name!r}, file={self._file!r})>"
 
-    def msg(self, message: bytes) -> None:
+    def _structlog_raw_write(self, message: bytes) -> None:
         """
-        Write *message*.
+        Write *message* without evaluating any emission frame.
         """
         with self._lock:
             self._write(message + b"\n")
             self._flush()
 
-    log = debug = info = warn = warning = msg
-    fatal = failure = err = error = critical = exception = msg
+    msg = _NATIVE_MSG
+    debug = _NATIVE_DEBUG
+    info = _NATIVE_INFO
+    warning = warn = _NATIVE_WARNING
+    error = err = exception = _NATIVE_ERROR
+    critical = fatal = failure = _NATIVE_CRITICAL
+    log = _NATIVE_LOG
 
 
 class BytesLoggerFactory:
